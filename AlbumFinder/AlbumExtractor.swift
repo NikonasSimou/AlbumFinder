@@ -53,8 +53,9 @@ nonisolated enum AlbumExtractor {
             Also give the video a short title, using its headline text if it has one.
             """)
 
-        // The on-device model has a small context window, so cap how much on-screen text we send.
-        let screenText = onScreenText.prefix(120).joined(separator: "\n")
+        // The on-device model has a small context window (about 4,000 tokens), so cap the text we send.
+        let screenLines = joiningArtistLines(withoutSpokenCaptions(onScreenText, transcript: transcript))
+        let screenText = String(screenLines.joined(separator: "\n").prefix(4000))
         let prompt = """
             Speech transcript:
             \(transcript.isEmpty ? "(no speech)" : String(transcript.prefix(4000)))
@@ -70,5 +71,53 @@ nonisolated enum AlbumExtractor {
         }
         let title = response.content.title.trimmingCharacters(in: .whitespacesAndNewlines)
         return (title.isEmpty ? "Untitled video" : title, unique)
+    }
+
+    /// These videos often caption the speech one word at a time ("RIFFS", "FORMULA"). Those lines only
+    /// repeat the transcript and can crowd album titles out of the prompt, so drop bare words it contains.
+    /// Lines with punctuation stay, e.g. "- Tinashe", which ties an artist to the album above it.
+    static func withoutSpokenCaptions(_ lines: [String], transcript: String) -> [String] {
+        let spoken = Set(transcript.lowercased().split { !$0.isLetter && !$0.isNumber }.map(String.init))
+        return lines.filter { line in
+            let word = line.trimmingCharacters(in: .whitespaces).lowercased()
+            let isBareWord = !word.isEmpty && word.allSatisfy { $0.isLetter || $0.isNumber }
+            return !(isBareWord && spoken.contains(word))
+        }
+    }
+
+    /// Overlays often show a title with the artist on the next line ("Pugnello" / "- Gilla Band").
+    /// Joining them into one line keeps the model from pairing a title with the wrong artist.
+    static func joiningArtistLines(_ lines: [String]) -> [String] {
+        var joined: [String] = []
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if let previous = joined.last, let dash = trimmed.first, "-–—".contains(dash) {
+                joined[joined.count - 1] = "\(previous) \(trimmed)"
+            } else {
+                joined.append(line)
+            }
+        }
+        return joined
+    }
+
+    /// The "Title - Artist" overlays, without "12."-style ranking numbers. Overlays don't agree on
+    /// which side is the artist, so the lookup should try both.
+    static func screenPairs(_ onScreenText: [String], transcript: String) -> [AlbumMention] {
+        joiningArtistLines(withoutSpokenCaptions(onScreenText, transcript: transcript)).compactMap { line in
+            guard let dash = line.ranges(of: #/\s[-\u{2013}\u{2014}]\s/#).last else { return nil }
+            let album = line[..<dash.lowerBound].replacing(#/^\s*\d+\.\s*/#, with: "").trimmingCharacters(in: .whitespaces)
+            let artist = line[dash.upperBound...].trimmingCharacters(in: .whitespaces)
+            guard !album.isEmpty, !artist.isEmpty else { return nil }
+            return AlbumMention(artist: artist, album: album)
+        }
+    }
+}
+
+extension AlbumMention {
+    /// Whether the two share an artist or album name (either way round), ignoring case and punctuation.
+    nonisolated func overlaps(_ other: AlbumMention) -> Bool {
+        func key(_ s: String) -> String { s.lowercased().filter { $0.isLetter || $0.isNumber } }
+        let names = [key(artist), key(album)].filter { !$0.isEmpty }
+        return [key(other.artist), key(other.album)].contains { names.contains($0) }
     }
 }

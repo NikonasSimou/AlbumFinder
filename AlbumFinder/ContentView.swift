@@ -43,6 +43,20 @@ final class Finder {
             for (position, mention) in mentions.enumerated() {
                 albums.append(SavedAlbum(position: position, match: try await AppleMusicSearch.match(mention)))
             }
+            // The model sometimes skips an album in a long list, so also look up any "Title - Artist"
+            // overlay it didn't list, keeping it only if Apple Music has it.
+            var listed = mentions
+            for pair in AlbumExtractor.screenPairs(onScreenText, transcript: transcript)
+            where !listed.contains(where: { $0.overlaps(pair) }) {
+                var match = try await AppleMusicSearch.match(pair)
+                if match.album == nil {
+                    match = try await AppleMusicSearch.match(AlbumMention(artist: pair.album, album: pair.artist))
+                }
+                if match.album != nil {
+                    albums.append(SavedAlbum(position: albums.count, match: match))
+                    listed.append(pair)
+                }
+            }
 
             let folder = RecommendationFolder(
                 title: title, transcript: transcript, onScreenText: onScreenText, speechNote: speechNote, albums: albums)
