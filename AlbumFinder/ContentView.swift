@@ -13,10 +13,12 @@ final class Finder {
     var state = State.idle
     var transcript = ""
     var onScreenText: [String] = []
+    var speechError: String?
 
     func run(_ item: PhotosPickerItem) async {
         transcript = ""
         onScreenText = []
+        speechError = nil
         do {
             state = .working("Loading video…")
             guard let movie = try await item.loadTransferable(type: Movie.self) else {
@@ -28,7 +30,13 @@ final class Finder {
             state = .working("Listening and reading the screen…")
             async let speech = VideoReader.transcript(of: movie.url)
             async let screen = VideoReader.onScreenText(of: movie.url)
-            (transcript, onScreenText) = try await (speech, screen)
+            onScreenText = try await screen
+            // Keep going with just the on-screen text if transcription isn't possible.
+            do {
+                transcript = try await speech
+            } catch {
+                speechError = error.localizedDescription
+            }
 
             state = .working("Finding the albums…")
             let mentions = try await AlbumExtractor.albums(transcript: transcript, onScreenText: onScreenText)
@@ -76,6 +84,12 @@ struct ContentView: View {
                     Section("Albums") {
                         ForEach(matches) { AlbumRow(match: $0) }
                     }
+                }
+
+                if let speechError = finder.speechError {
+                    Text("Only used on-screen text. \(speechError)")
+                        .font(.footnote)
+                        .foregroundStyle(.orange)
                 }
 
                 if !finder.transcript.isEmpty || !finder.onScreenText.isEmpty {
