@@ -41,14 +41,24 @@ nonisolated enum AppleMusicSearch {
         let results: [CatalogAlbum]
     }
 
-    static func match(_ mention: AlbumMention) async throws -> AlbumMatch {
+    /// Apple allows only about 20 searches a minute, so each search runs only if the ones before it
+    /// didn't settle the match. With `quick`, the fallbacks after the first two searches are skipped.
+    static func match(_ mention: AlbumMention, quick: Bool = false) async throws -> AlbumMatch {
         let term = "\(mention.artist) \(mention.album)".trimmingCharacters(in: .whitespaces)
+        let albums = try await search(term, entity: "album", limit: 25)
+        // Nothing can score higher than an exact artist and word-for-word title.
+        let perfect = mention.artist.isEmpty ? 4 : 5
+        if let found = scoredBest(in: albums, for: mention), found.score == perfect {
+            return AlbumMatch(mention: mention, album: found.album)
+        }
         // Album search only covers albums sold on the iTunes Store. Apple Music-only albums
         // (e.g. Frank Ocean's "Blonde") only show up as the album of a song result.
-        async let albums = search(term, entity: "album", limit: 25)
-        async let songs = search(term, entity: "song", limit: 25)
-        if let best = best(in: try await albums + songs, for: mention) {
+        let songs = try await search(term, entity: "song", limit: 25)
+        if let best = best(in: albums + songs, for: mention) {
             return AlbumMatch(mention: mention, album: best)
+        }
+        if quick {
+            return AlbumMatch(mention: mention, album: nil)
         }
         // Combined searches sometimes bury an album (e.g. Nick Drake's "Pink Moon")
         // that a search for just the artist finds.
@@ -62,9 +72,8 @@ nonisolated enum AppleMusicSearch {
         }
         // Search isn't forgiving about spelling, so a misheard artist ("Poppy Akroyd" for Ackroyd)
         // finds nothing. Searching the title alone still turns it up, and scoring tolerates the artist.
-        async let albumsByTitle = search(mention.album, entity: "album", limit: 50)
-        async let songsByTitle = search(mention.album, entity: "song", limit: 50)
-        let byTitle = try await albumsByTitle + songsByTitle
+        // Song results carry their album's name, so one song search covers albums too.
+        let byTitle = try await search(mention.album, entity: "song", limit: 50)
         return AlbumMatch(mention: mention, album: best(in: byTitle, for: mention, lastResort: true))
     }
 
@@ -79,6 +88,12 @@ nonisolated enum AppleMusicSearch {
     private static func best(
         in results: [CatalogAlbum], for mention: AlbumMention, lastResort: Bool = false, looseTitles: Bool = false
     ) -> CatalogAlbum? {
+        scoredBest(in: results, for: mention, lastResort: lastResort, looseTitles: looseTitles)?.album
+    }
+
+    private static func scoredBest(
+        in results: [CatalogAlbum], for mention: AlbumMention, lastResort: Bool = false, looseTitles: Bool = false
+    ) -> (album: CatalogAlbum, score: Int)? {
         var best: (album: CatalogAlbum, score: Int)?
         for album in results {
             let score = score(album, against: mention, lastResort: lastResort, looseTitles: looseTitles)
@@ -86,8 +101,22 @@ nonisolated enum AppleMusicSearch {
                 best = (album, score)
             }
         }
-        return best?.album
+        return best
     }
+
+    /// Spaces out network searches. Apple allows about 20 a minute, answers 429 past that, and blocks
+    /// the device for a while (403) if it keeps getting too many.
+    private actor Pacer {
+        private var next = ContinuousClock.now
+
+        func waitForTurn() async throws {
+            let turn = max(ContinuousClock.now, next)
+            next = turn + .seconds(3)
+            try await Task.sleep(until: turn)
+        }
+    }
+
+    private static let pacer = Pacer()
 
     private static func search(_ term: String, entity: String, limit: Int) async throws -> [CatalogAlbum] {
         var components = URLComponents(string: "https://itunes.apple.com/search")!
@@ -97,8 +126,23 @@ nonisolated enum AppleMusicSearch {
             URLQueryItem(name: "limit", value: "\(limit)"),
             URLQueryItem(name: "country", value: Locale.current.region?.identifier ?? "US"),
         ]
-        let (data, _) = try await URLSession.shared.data(from: components.url!)
-        return try JSONDecoder().decode(Response.self, from: data).results
+        let request = URLRequest(url: components.url!)
+        // Results are cacheable for a day, and only network requests count against Apple's limit.
+        if let cached = URLCache.shared.cachedResponse(for: request) {
+            return try JSONDecoder().decode(Response.self, from: cached.data).results
+        }
+        for attempt in 1...3 {
+            try await pacer.waitForTurn()
+            let (data, response) = try await URLSession.shared.data(for: request)
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            if status == 200 {
+                return try JSONDecoder().decode(Response.self, from: data).results
+            }
+            // 429 means slow down: wait and retry. Anything else (e.g. a 403 block) won't clear soon.
+            guard status == 429 else { throw URLError(.badServerResponse) }
+            try await Task.sleep(for: .seconds(5 * attempt))
+        }
+        throw URLError(.resourceUnavailable)
     }
 
     /// 2 points per field for an exact match, 1 when they're close, and a bonus point when the

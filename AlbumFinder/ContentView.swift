@@ -11,18 +11,26 @@ final class Finder {
     }
 
     var state = State.idle
+    /// The run in progress, so iOS can stop it if it has to.
+    var runTask: Task<Void, Never>?
 
     /// Analyzes the video and saves the result as a new folder.
     func run(_ item: PhotosPickerItem, in context: ModelContext) async -> RecommendationFolder? {
+        await BackgroundRun.requestNotificationPermission()
+        let background = BackgroundRun { [weak self] in self?.runTask?.cancel() }
+        func step(_ number: Int64, _ description: String) {
+            state = .working(description)
+            background.step(number, description)
+        }
         do {
-            state = .working("Loading video…")
+            step(0, "Loading video…")
             guard let movie = try await item.loadTransferable(type: Movie.self) else {
                 state = .failed("Couldn't load that video.")
                 return nil
             }
             defer { try? FileManager.default.removeItem(at: movie.url) }
 
-            state = .working("Listening and reading the screen…")
+            step(1, "Listening and reading the screen…")
             async let speech = VideoReader.transcript(of: movie.url)
             async let screen = VideoReader.screen(of: movie.url)
             let (onScreenText, covers) = try await screen
@@ -35,22 +43,25 @@ final class Finder {
                 speechNote = error.localizedDescription
             }
 
-            state = .working("Finding the albums…")
+            step(2, "Finding the albums…")
             let (title, mentions) = try await AlbumExtractor.albums(transcript: transcript, onScreenText: onScreenText)
 
-            state = .working("Looking them up in Apple Music…")
+            step(3, "Looking them up in Apple Music…")
+            // A lookup that still fails after retrying leaves that album unmatched rather than failing the run.
             var matches: [AlbumMatch] = []
             for mention in mentions {
-                matches.append(try await AppleMusicSearch.match(mention))
+                matches.append((try? await AppleMusicSearch.match(mention)) ?? AlbumMatch(mention: mention, album: nil))
             }
             // The model sometimes skips an album in a long list, so also look up any "Title - Artist"
-            // overlay it didn't list, keeping it only if Apple Music has it.
+            // overlay it didn't list, keeping it only if Apple Music has it. Overlay names are clean, so
+            // a quick lookup each way round is enough and saves searches.
             let screenPairs = AlbumExtractor.screenPairs(onScreenText, transcript: transcript)
             var listed = mentions
             for pair in screenPairs where !listed.contains(where: { $0.overlaps(pair) }) {
-                var match = try await AppleMusicSearch.match(pair)
-                if match.album == nil {
-                    match = try await AppleMusicSearch.match(AlbumMention(artist: pair.album, album: pair.artist))
+                var match = (try? await AppleMusicSearch.match(pair, quick: true)) ?? AlbumMatch(mention: pair, album: nil)
+                if match.album == nil,
+                   let swapped = try? await AppleMusicSearch.match(AlbumMention(artist: pair.album, album: pair.artist), quick: true) {
+                    match = swapped
                 }
                 if match.album != nil {
                     matches.append(match)
@@ -59,7 +70,7 @@ final class Finder {
             }
 
             // Covers are extra evidence, so a failed download or comparison never fails the run.
-            state = .working("Checking album covers…")
+            step(4, "Checking album covers…")
             var albums: [SavedAlbum] = []
             for var match in matches {
                 var coverSeen = false
@@ -84,9 +95,14 @@ final class Finder {
                 title: title, transcript: transcript, onScreenText: onScreenText, speechNote: speechNote, albums: albums)
             context.insert(folder)
             state = .idle
+            background.finish(title: "Albums found", message: "\(albums.count) album\(albums.count == 1 ? "" : "s") from “\(title)”", success: true)
             return folder
         } catch {
-            state = .failed(error.localizedDescription)
+            let message = error is CancellationError
+                ? "iOS stopped the run before it finished. Open Album Finder and try again."
+                : error.localizedDescription
+            state = .failed(message)
+            background.finish(title: "Couldn't find the albums", message: message, success: false)
             return nil
         }
     }
@@ -144,7 +160,7 @@ struct ContentView: View {
             .onChange(of: selection) { _, item in
                 guard let item else { return }
                 selection = nil
-                Task {
+                finder.runTask = Task {
                     if let folder = await finder.run(item, in: context) {
                         path.append(folder)
                     }

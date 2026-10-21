@@ -219,6 +219,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "AlbumFinder-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = "Album Finder";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Album Finder transcribes the videos you pick, on your iPhone, to find the albums mentioned.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -246,6 +247,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "AlbumFinder-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = "Album Finder";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Album Finder transcribes the videos you pick, on your iPhone, to find the albums mentioned.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
