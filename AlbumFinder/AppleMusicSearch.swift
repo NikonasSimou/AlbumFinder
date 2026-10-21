@@ -19,6 +19,8 @@ nonisolated struct CatalogAlbum: Decodable {
     let collectionName: String
     let collectionViewUrl: URL
     let artworkUrl100: URL?
+    /// Set on song results: the track, which `collectionName` is the album of.
+    let trackName: String?
 
     /// Song results link to their album with "?i=<track>" appended; drop it to open the album itself.
     var url: URL {
@@ -45,18 +47,31 @@ nonisolated enum AppleMusicSearch {
         }
         // Combined searches sometimes bury an album (e.g. Nick Drake's "Pink Moon")
         // that a search for just the artist finds.
-        guard !mention.artist.isEmpty else { return AlbumMatch(mention: mention, album: nil) }
-        let byArtist = try await search(mention.artist, entity: "album", limit: 200)
-        return AlbumMatch(mention: mention, album: best(in: byArtist, for: mention))
+        if !mention.artist.isEmpty {
+            let byArtist = try await search(mention.artist, entity: "album", limit: 200)
+            // Within one artist's releases a loosely similar title is safe to accept, which catches
+            // foreign titles heard as English words ("Desire Disaster" for "Désir des astres").
+            if let best = best(in: byArtist, for: mention) ?? best(in: byArtist, for: mention, looseTitles: true) {
+                return AlbumMatch(mention: mention, album: best)
+            }
+        }
+        // Search isn't forgiving about spelling, so a misheard artist ("Poppy Akroyd" for Ackroyd)
+        // finds nothing. Searching the title alone still turns it up, and scoring tolerates the artist.
+        async let albumsByTitle = search(mention.album, entity: "album", limit: 50)
+        async let songsByTitle = search(mention.album, entity: "song", limit: 50)
+        let byTitle = try await albumsByTitle + songsByTitle
+        return AlbumMatch(mention: mention, album: best(in: byTitle, for: mention, matchingTracks: true))
     }
 
     /// Search results include tribute albums, karaoke versions and other artists' albums,
     /// so only accept a result whose artist and title both resemble what was mentioned.
     /// On a tie, the earlier result wins: it's ranked higher by Apple.
-    private static func best(in results: [CatalogAlbum], for mention: AlbumMention) -> CatalogAlbum? {
+    private static func best(
+        in results: [CatalogAlbum], for mention: AlbumMention, matchingTracks: Bool = false, looseTitles: Bool = false
+    ) -> CatalogAlbum? {
         var best: (album: CatalogAlbum, score: Int)?
         for album in results {
-            let score = score(album, against: mention)
+            let score = score(album, against: mention, matchingTracks: matchingTracks, looseTitles: looseTitles)
             if score >= 2, score > (best?.score ?? 0) {
                 best = (album, score)
             }
@@ -79,8 +94,15 @@ nonisolated enum AppleMusicSearch {
     /// 2 points per field for an exact match, 1 when they're close, and a bonus point when the
     /// title matches word for word, so "Rumours" beats "Rumours (Live)". With no artist, the title
     /// alone decides and Apple's ranking breaks ties.
-    private static func score(_ album: CatalogAlbum, against mention: AlbumMention) -> Int {
-        let title = similarity(album.collectionName, mention.album)
+    /// With `matchingTracks`, a recommended track (e.g. Poppy Ackroyd's "Continuum") matches the album
+    /// it's on. That's a last resort: otherwise "Pink Moon" would match a compilation with that song.
+    /// `looseTitles` accepts titles up to about a third different.
+    private static func score(_ album: CatalogAlbum, against mention: AlbumMention, matchingTracks: Bool, looseTitles: Bool) -> Int {
+        let trackTitle = matchingTracks ? album.trackName.map { min(1, similarity($0, mention.album)) } ?? 0 : 0
+        var title = max(similarity(album.collectionName, mention.album), trackTitle)
+        if title == 0, looseTitles, isClose(album.collectionName, mention.album, tolerance: 3) {
+            title = 1
+        }
         var artist = mention.artist.isEmpty ? 1 : similarity(album.artistName, mention.artist)
         // With the exact title, allow a more misheard artist, e.g. "Cocktail Twins" for "Cocteau Twins".
         if artist == 0, title == 2, isClose(album.artistName, mention.artist, tolerance: 3) {
@@ -120,11 +142,14 @@ nonisolated enum AppleMusicSearch {
         return previous[b.count]
     }
 
-    /// Lowercase, drop "(Deluxe Edition)"-style suffixes, a leading "the", and punctuation.
+    /// Lowercase, drop accents, "(Deluxe Edition)" and " - Single"-style suffixes, a leading "the", and punctuation.
     private static func normalized(_ s: String) -> String {
-        var s = s.lowercased()
+        var s = s.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
         if let bracket = s.firstIndex(where: { $0 == "(" || $0 == "[" }) {
             s = String(s[..<bracket])
+        }
+        for suffix in [" - single", " - ep"] where s.hasSuffix(suffix) {
+            s.removeLast(suffix.count)
         }
         s = s.filter { $0.isLetter || $0.isNumber || $0 == " " }
             .trimmingCharacters(in: .whitespaces)

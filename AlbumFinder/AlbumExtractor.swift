@@ -49,7 +49,11 @@ nonisolated enum AlbumExtractor {
             they may be new releases you don't know yet. Include albums whose artist is only implied \
             (e.g. "Red, Taylor's Version" is Taylor Swift's album), leaving the artist empty if you can't tell. \
             Fix spellings of artists and albums that were clearly misheard, e.g. "Fortet" is Four Tet. \
-            Leave out playlists and anything the person clearly calls a song or single.
+            Speech recognition turns titles in other languages into English-sounding words, so for those \
+            prefer the on-screen spelling. On-screen subtitles can break a word across two lines \
+            (e.g. "Dé" then "sir des astres" is "Désir des astres").
+            Include singles, EPs and tracks recommended as releases in their own right, but not songs \
+            mentioned as highlights of an album. Leave out playlists.
             Also give the video a short title, using its headline text if it has one.
             """)
 
