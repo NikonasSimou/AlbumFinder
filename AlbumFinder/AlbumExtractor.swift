@@ -11,6 +11,8 @@ nonisolated struct AlbumMention: Equatable {
 
 @Generable
 nonisolated struct AlbumList {
+    @Guide(description: "A short title for the video, from its headline text if it has one, e.g. \"8 Albums You Need This Fall\"")
+    var title: String
     @Guide(description: "Every album recommended in the video, in the order they come up")
     var albums: [AlbumMention]
 }
@@ -27,7 +29,7 @@ nonisolated enum AlbumExtractor {
         }
     }
 
-    static func albums(transcript: String, onScreenText: [String]) async throws -> [AlbumMention] {
+    static func albums(transcript: String, onScreenText: [String]) async throws -> (title: String, albums: [AlbumMention]) {
         switch SystemLanguageModel.default.availability {
         case .available:
             break
@@ -43,8 +45,10 @@ nonisolated enum AlbumExtractor {
             You find music album recommendations in short social media videos.
             You get a speech transcript, which may contain misheard words, and text read off the screen, \
             which also contains noise such as usernames, watermarks and captions.
-            List every album the person recommends, with its artist. Fix spellings of artists and albums \
-            that were clearly misheard. Leave out single songs, playlists and anything you are unsure is an album.
+            List every album the person recommends, with its artist. Include albums you don't recognize: \
+            they may be new releases you don't know yet. Fix spellings of artists and albums that were \
+            clearly misheard. Leave out playlists and anything the person clearly calls a song or single.
+            Also give the video a short title, using its headline text if it has one.
             """)
 
         // The on-device model has a small context window, so cap how much on-screen text we send.
@@ -62,6 +66,7 @@ nonisolated enum AlbumExtractor {
         for mention in response.content.albums where !unique.contains(mention) {
             unique.append(mention)
         }
-        return unique
+        let title = response.content.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (title.isEmpty ? "Untitled video" : title, unique)
     }
 }
