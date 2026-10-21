@@ -24,8 +24,8 @@ final class Finder {
 
             state = .working("Listening and reading the screen…")
             async let speech = VideoReader.transcript(of: movie.url)
-            async let screen = VideoReader.onScreenText(of: movie.url)
-            let onScreenText = try await screen
+            async let screen = VideoReader.screen(of: movie.url)
+            let (onScreenText, covers) = try await screen
             // Keep going with just the on-screen text if transcription isn't possible.
             var transcript = ""
             var speechNote: String?
@@ -39,23 +39,45 @@ final class Finder {
             let (title, mentions) = try await AlbumExtractor.albums(transcript: transcript, onScreenText: onScreenText)
 
             state = .working("Looking them up in Apple Music…")
-            var albums: [SavedAlbum] = []
-            for (position, mention) in mentions.enumerated() {
-                albums.append(SavedAlbum(position: position, match: try await AppleMusicSearch.match(mention)))
+            var matches: [AlbumMatch] = []
+            for mention in mentions {
+                matches.append(try await AppleMusicSearch.match(mention))
             }
             // The model sometimes skips an album in a long list, so also look up any "Title - Artist"
             // overlay it didn't list, keeping it only if Apple Music has it.
+            let screenPairs = AlbumExtractor.screenPairs(onScreenText, transcript: transcript)
             var listed = mentions
-            for pair in AlbumExtractor.screenPairs(onScreenText, transcript: transcript)
-            where !listed.contains(where: { $0.overlaps(pair) }) {
+            for pair in screenPairs where !listed.contains(where: { $0.overlaps(pair) }) {
                 var match = try await AppleMusicSearch.match(pair)
                 if match.album == nil {
                     match = try await AppleMusicSearch.match(AlbumMention(artist: pair.album, album: pair.artist))
                 }
                 if match.album != nil {
-                    albums.append(SavedAlbum(position: albums.count, match: match))
+                    matches.append(match)
                     listed.append(pair)
                 }
+            }
+
+            // Covers are extra evidence, so a failed download or comparison never fails the run.
+            state = .working("Checking album covers…")
+            var albums: [SavedAlbum] = []
+            for var match in matches {
+                var coverSeen = false
+                if let album = match.album {
+                    coverSeen = (try? await CoverMatcher.wasShown(album, in: covers)) ?? false
+                } else if !match.mention.artist.isEmpty,
+                          let releases = try? await AppleMusicSearch.releases(by: match.mention.artist),
+                          let shown = try? await CoverMatcher.pick(from: releases, shown: covers) {
+                    // The title didn't match anything, but one of the artist's covers was on screen.
+                    match = AlbumMatch(mention: match.mention, album: shown)
+                    coverSeen = true
+                }
+                // An unmatched entry whose names appear nowhere in the video was made up by the model.
+                if match.album == nil,
+                   !AlbumExtractor.appears(match.mention, in: transcript + "\n" + onScreenText.joined(separator: "\n")) {
+                    continue
+                }
+                albums.append(SavedAlbum(position: albums.count, match: match, coverSeen: coverSeen))
             }
 
             let folder = RecommendationFolder(

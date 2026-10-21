@@ -11,7 +11,7 @@ nonisolated struct AlbumMention: Equatable {
 
 @Generable
 nonisolated struct AlbumList {
-    @Guide(description: "A short title for the video, from its headline text if it has one, e.g. \"8 Albums You Need This Fall\"")
+    @Guide(description: "A short title for the video, from its headline text if it has one")
     var title: String
     @Guide(description: "Every album recommended in the video, in the order they come up")
     var albums: [AlbumMention]
@@ -41,33 +41,28 @@ nonisolated enum AlbumExtractor {
             throw ExtractError.modelUnavailable("This iPhone doesn't support Apple Intelligence.")
         }
 
-        let session = LanguageModelSession(instructions: """
+        let instructions = """
             You find music album recommendations in short social media videos.
             You get a speech transcript, which may contain misheard words, and text read off the screen, \
             which also contains noise such as usernames, watermarks and captions.
-            List every album the person recommends, with its artist. Include albums you don't recognize: \
-            they may be new releases you don't know yet. Include albums whose artist is only implied \
-            (e.g. "Red, Taylor's Version" is Taylor Swift's album), leaving the artist empty if you can't tell. \
-            Fix spellings of artists and albums that were clearly misheard, e.g. "Fortet" is Four Tet. \
-            Speech recognition turns titles in other languages into English-sounding words, so for those \
-            prefer the on-screen spelling. On-screen subtitles can break a word across two lines \
-            (e.g. "Dé" then "sir des astres" is "Désir des astres").
+            List every album the person recommends, with its artist. Only list albums that come up in this \
+            video's transcript or screen text. Include albums you don't recognize: they may be new releases \
+            you don't know yet. If the artist is only implied by the album title, give the artist you know \
+            made it, or leave the artist empty if you can't tell.
+            Fix artist and album names that were clearly misheard. When the screen text spells a name \
+            differently from the transcript, use the screen spelling: speech recognition often mishears \
+            names, and turns titles in other languages into English-sounding words. On-screen subtitles \
+            can break a word, or a name, across two lines.
+            Leave out albums mentioned only for comparison or as reference points ("if you like X", \
+            "it sounds like X"), even when their cover is shown.
             Include singles, EPs and tracks recommended as releases in their own right, but not songs \
             mentioned as highlights of an album. Leave out playlists.
             Also give the video a short title, using its headline text if it has one.
-            """)
-
-        // The on-device model has a small context window (about 4,000 tokens), so cap the text we send.
-        let screenLines = joiningArtistLines(withoutSpokenCaptions(onScreenText, transcript: transcript))
-        let screenText = String(screenLines.joined(separator: "\n").prefix(4000))
-        let prompt = """
-            Speech transcript:
-            \(transcript.isEmpty ? "(no speech)" : String(transcript.prefix(4000)))
-
-            Text shown on screen:
-            \(screenText.isEmpty ? "(none)" : screenText)
             """
+        let screenText = joiningArtistLines(withoutSpokenCaptions(onScreenText, transcript: transcript)).joined(separator: "\n")
+        let prompt = await fittedPrompt(instructions: instructions, transcript: transcript, screenText: screenText)
 
+        let session = LanguageModelSession(instructions: instructions)
         let response = try await session.respond(to: prompt, generating: AlbumList.self)
         var unique: [AlbumMention] = []
         for mention in response.content.albums where !unique.contains(mention) {
@@ -77,15 +72,73 @@ nonisolated enum AlbumExtractor {
         return (title.isEmpty ? "Untitled video" : title, unique)
     }
 
-    /// These videos often caption the speech one word at a time ("RIFFS", "FORMULA"). Those lines only
-    /// repeat the transcript and can crowd album titles out of the prompt, so drop bare words it contains.
-    /// Lines with punctuation stay, e.g. "- Tinashe", which ties an artist to the album above it.
+    /// Whether the artist or album appears anywhere in the video's text, ignoring spaces and punctuation.
+    /// The model sometimes makes up an entry, so one that fails this wasn't in the video.
+    static func appears(_ mention: AlbumMention, in text: String) -> Bool {
+        func letters(_ s: String) -> String {
+            s.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil).filter { $0.isLetter || $0.isNumber }
+        }
+        let videoText = letters(text)
+        return [mention.artist, mention.album].map(letters).contains { $0.count >= 4 && videoText.contains($0) }
+    }
+
+    /// The on-device model's context window (about 4,000 tokens) holds the instructions, the answer
+    /// format, the prompt and the answer, so shorten the prompt until it fits with room for a long
+    /// answer. Screen text goes first: recommendations are usually spoken, so the transcript matters more.
+    static func fittedPrompt(instructions: String, transcript: String, screenText: String) async -> String {
+        func prompt(_ transcript: String, _ screenText: String) -> String {
+            """
+            Speech transcript:
+            \(transcript.isEmpty ? "(no speech)" : transcript)
+
+            Text shown on screen:
+            \(screenText.isEmpty ? "(none)" : screenText)
+            """
+        }
+        // Counting needs iOS 26.4; before that, estimate about 3 characters per token.
+        func tokens(_ text: String) async -> Int {
+            guard #available(iOS 26.4, *) else { return text.count / 3 }
+            return (try? await SystemLanguageModel.default.tokenCount(for: text)) ?? text.count / 3
+        }
+        var format = 300
+        if #available(iOS 26.4, *), let count = try? await SystemLanguageModel.default.tokenCount(for: AlbumList.generationSchema) {
+            format = count
+        }
+        let answer = 800  // about 25 albums
+        let budget = SystemLanguageModel.default.contextSize - (await tokens(instructions)) - format - answer
+
+        var transcript = transcript, screenText = screenText
+        for _ in 0..<6 {
+            let candidate = prompt(transcript, screenText)
+            let used = await tokens(candidate)
+            if used <= budget { return candidate }
+            // Cut the overflowing share of characters, plus a little, from screen text, then the transcript.
+            let cut = candidate.count * (used - budget) / used + 50
+            if !screenText.isEmpty {
+                screenText = String(screenText.prefix(max(0, screenText.count - cut)))
+            } else {
+                transcript = String(transcript.prefix(max(0, transcript.count - cut)))
+            }
+        }
+        return prompt(transcript, screenText)
+    }
+
+    /// These videos often caption the speech, one word at a time ("RIFFS", "FORMULA") or as subtitles.
+    /// Those lines only repeat the transcript and can crowd album titles out of the prompt, so drop
+    /// bare words and longer lines made entirely of words the transcript has. Lines with a dash stay,
+    /// e.g. "- Tinashe", which ties an artist to the album above it.
     static func withoutSpokenCaptions(_ lines: [String], transcript: String) -> [String] {
-        let spoken = Set(transcript.lowercased().split { !$0.isLetter && !$0.isNumber }.map(String.init))
+        func words(_ text: String) -> [String] {
+            text.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
+                .split { !$0.isLetter && !$0.isNumber && $0 != "'" }.map(String.init)
+        }
+        let spoken = Set(words(transcript))
         return lines.filter { line in
-            let word = line.trimmingCharacters(in: .whitespaces).lowercased()
-            let isBareWord = !word.isEmpty && word.allSatisfy { $0.isLetter || $0.isNumber }
-            return !(isBareWord && spoken.contains(word))
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            let lineWords = words(trimmed)
+            let isBareWord = lineWords.count == 1 && trimmed.allSatisfy { $0.isLetter || $0.isNumber }
+            let isSubtitle = lineWords.count >= 3 && !trimmed.contains(#/\s[-\u{2013}\u{2014}]\s|^[-\u{2013}\u{2014}]/#)
+            return !((isBareWord || isSubtitle) && lineWords.allSatisfy(spoken.contains))
         }
     }
 

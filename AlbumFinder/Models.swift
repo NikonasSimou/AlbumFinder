@@ -40,16 +40,16 @@ final class SavedAlbum {
     var artworkURL: URL?
     /// false when Apple Music had no confident match and `link` is a search instead.
     var matched: Bool
+    /// Whether this album's cover appeared in the video.
+    var coverSeen: Bool = false
 
-    init(position: Int, match: AlbumMatch) {
+    init(position: Int, match: AlbumMatch, coverSeen: Bool) {
         self.position = position
         self.artist = match.album?.artistName ?? match.mention.artist
         self.title = match.album?.collectionName ?? match.mention.album
         self.link = match.link
-        // The API returns 100px artwork; the same URL serves larger sizes.
-        self.artworkURL = match.album?.artworkUrl100.flatMap {
-            URL(string: $0.absoluteString.replacingOccurrences(of: "100x100bb", with: "600x600bb"))
-        }
+        self.artworkURL = match.album?.largeArtworkURL
         self.matched = match.album != nil
+        self.coverSeen = coverSeen
     }
 }

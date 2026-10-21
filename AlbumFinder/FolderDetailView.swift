@@ -96,6 +96,10 @@ struct AlbumRow: View {
                         Text("No exact match. Tap to search Apple Music")
                             .font(.caption)
                             .foregroundStyle(.orange)
+                    } else if album.coverSeen {
+                        Label("Cover seen in video", systemImage: "eye")
+                            .font(.caption)
+                            .foregroundStyle(.green)
                     }
                 }
                 .foregroundStyle(.primary)

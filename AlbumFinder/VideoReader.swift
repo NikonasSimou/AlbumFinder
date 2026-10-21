@@ -105,8 +105,9 @@ nonisolated enum VideoReader {
         return output
     }
 
-    /// Reads text off frames sampled every 1.5 seconds (album titles in overlays, covers, captions).
-    @concurrent static func onScreenText(of videoURL: URL) async throws -> [String] {
+    /// Reads text off frames sampled every 1.5 seconds (album titles in overlays, covers, captions),
+    /// and fingerprints whatever might be an album cover in them.
+    @concurrent static func screen(of videoURL: URL) async throws -> (lines: [String], covers: [FeaturePrintObservation]) {
         let asset = AVURLAsset(url: videoURL)
         let duration = try await asset.load(.duration).seconds
 
@@ -123,8 +124,17 @@ nonisolated enum VideoReader {
         // The same overlay stays on screen across many frames, so keep each line once.
         var seen = Set<String>()
         var lines: [String] = []
+        var covers: [FeaturePrintObservation] = []
+        var lastFramePrint: FeaturePrintObservation?
         for await frame in generator.images(for: times) {
             guard let image = try? frame.image else { continue }
+            // Looking for covers is the slow part, so skip frames that look like the previous one.
+            let framePrint = try await GenerateImageFeaturePrintRequest().perform(on: image)
+            if lastFramePrint.map({ (try? framePrint.distance(to: $0)) ?? 1 }) ?? 1 > 0.25 {
+                covers.append(framePrint)
+                covers += try await CoverMatcher.coverPrints(in: image)
+                lastFramePrint = framePrint
+            }
             for observation in try await request.perform(on: image) {
                 guard let line = observation.topCandidates(1).first?.string, line.count > 1 else { continue }
                 if seen.insert(line.lowercased()).inserted {
@@ -132,6 +142,6 @@ nonisolated enum VideoReader {
                 }
             }
         }
-        return lines
+        return (lines, covers)
     }
 }
