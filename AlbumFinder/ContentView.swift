@@ -83,6 +83,11 @@ struct ContentView: View {
                             NavigationLink(value: folder) {
                                 FolderRow(folder: folder)
                             }
+                            .contextMenu {
+                                Button("Delete", systemImage: "trash", role: .destructive) {
+                                    context.delete(folder)
+                                }
+                            }
                         }
                         .onDelete { offsets in
                             for index in offsets {
@@ -93,7 +98,13 @@ struct ContentView: View {
                 }
             }
             .navigationTitle("Album Finder")
-            .navigationDestination(for: RecommendationFolder.self) { FolderDetailView(folder: $0) }
+            .navigationDestination(for: RecommendationFolder.self) { folder in
+                FolderDetailView(folder: folder) {
+                    // Leave the folder's screen before deleting what it shows.
+                    path.removeAll { $0 == folder }
+                    context.delete(folder)
+                }
+            }
             .onChange(of: selection) { _, item in
                 guard let item else { return }
                 selection = nil
@@ -168,7 +179,7 @@ struct FolderRow: View {
                 Text(folder.title)
                     .font(.headline)
                     .lineLimit(2)
-                Text("\(folder.createdAt.formatted(date: .abbreviated, time: .omitted)) · \(folder.albums.count) albums")
+                Text("\(folder.createdAt.formatted(date: .abbreviated, time: .omitted)) · ^[\(folder.albums.count) album](inflect: true)")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             }

@@ -3,8 +3,10 @@ import SwiftUI
 /// One saved video: its albums, plus what the app heard and saw so misses can be checked later.
 struct FolderDetailView: View {
     @Bindable var folder: RecommendationFolder
+    let onDelete: () -> Void
     @State private var renaming = false
     @State private var newTitle = ""
+    @State private var confirmingDelete = false
 
     var body: some View {
         List {
@@ -12,7 +14,7 @@ struct FolderDetailView: View {
                 VStack(alignment: .leading, spacing: 6) {
                     Text(folder.title)
                         .font(.largeTitle.bold())
-                    Text("\(folder.createdAt.formatted(date: .long, time: .omitted)) · \(folder.albums.count) albums")
+                    Text("\(folder.createdAt.formatted(date: .long, time: .omitted)) · ^[\(folder.albums.count) album](inflect: true)")
                         .foregroundStyle(.secondary)
                 }
                 .listRowBackground(Color.clear)
@@ -47,10 +49,20 @@ struct FolderDetailView: View {
         }
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            Button("Rename", systemImage: "pencil") {
-                newTitle = folder.title
-                renaming = true
+            Menu("More", systemImage: "ellipsis") {
+                Button("Rename", systemImage: "pencil") {
+                    newTitle = folder.title
+                    renaming = true
+                }
+                Button("Delete", systemImage: "trash", role: .destructive) {
+                    confirmingDelete = true
+                }
             }
+        }
+        .confirmationDialog("Delete this folder?", isPresented: $confirmingDelete, titleVisibility: .visible) {
+            Button("Delete", role: .destructive, action: onDelete)
+        } message: {
+            Text("Its albums will be removed from Album Finder.")
         }
         .alert("Rename folder", isPresented: $renaming) {
             TextField("Title", text: $newTitle)
