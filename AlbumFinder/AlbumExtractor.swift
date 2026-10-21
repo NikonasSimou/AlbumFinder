@@ -3,7 +3,7 @@ import FoundationModels
 
 @Generable
 nonisolated struct AlbumMention: Equatable {
-    @Guide(description: "The artist or band name, correctly spelled")
+    @Guide(description: "The artist or band name, correctly spelled. If it isn't said, the artist you know made this album, or empty if you don't know")
     var artist: String
     @Guide(description: "The album title, correctly spelled")
     var album: String
@@ -46,8 +46,10 @@ nonisolated enum AlbumExtractor {
             You get a speech transcript, which may contain misheard words, and text read off the screen, \
             which also contains noise such as usernames, watermarks and captions.
             List every album the person recommends, with its artist. Include albums you don't recognize: \
-            they may be new releases you don't know yet. Fix spellings of artists and albums that were \
-            clearly misheard. Leave out playlists and anything the person clearly calls a song or single.
+            they may be new releases you don't know yet. Include albums whose artist is only implied \
+            (e.g. "Red, Taylor's Version" is Taylor Swift's album), leaving the artist empty if you can't tell. \
+            Fix spellings of artists and albums that were clearly misheard, e.g. "Fortet" is Four Tet. \
+            Leave out playlists and anything the person clearly calls a song or single.
             Also give the video a short title, using its headline text if it has one.
             """)
 
