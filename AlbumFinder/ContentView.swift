@@ -18,21 +18,24 @@ final class Finder {
     func run(_ item: PhotosPickerItem, in context: ModelContext) async -> RecommendationFolder? {
         await BackgroundRun.requestNotificationPermission()
         let background = BackgroundRun { [weak self] in self?.runTask?.cancel() }
-        func step(_ number: Int64, _ description: String) {
+        /// Starts a step that covers `start` to `end` of the run; report the step's own progress (0 to 1)
+        /// with the returned function, so iOS sees the run moving and doesn't stop it as stalled.
+        func step(_ description: String, from start: Double, to end: Double) -> @MainActor (Double) -> Void {
             state = .working(description)
-            background.step(number, description)
+            background.update(description, done: start)
+            return { background.update(description, done: start + (end - start) * $0) }
         }
         do {
-            step(0, "Loading video…")
+            _ = step("Loading video…", from: 0, to: 0.05)
             guard let movie = try await item.loadTransferable(type: Movie.self) else {
                 state = .failed("Couldn't load that video.")
                 return nil
             }
             defer { try? FileManager.default.removeItem(at: movie.url) }
 
-            step(1, "Listening and reading the screen…")
+            let reading = step("Listening and reading the screen…", from: 0.05, to: 0.4)
             async let speech = VideoReader.transcript(of: movie.url)
-            async let screen = VideoReader.screen(of: movie.url)
+            async let screen = VideoReader.screen(of: movie.url, onProgress: reading)
             let (onScreenText, covers) = try await screen
             // Keep going with just the on-screen text if transcription isn't possible.
             var transcript = ""
@@ -43,21 +46,25 @@ final class Finder {
                 speechNote = error.localizedDescription
             }
 
-            step(2, "Finding the albums…")
+            _ = step("Finding the albums…", from: 0.4, to: 0.5)
             let (title, mentions) = try await AlbumExtractor.albums(transcript: transcript, onScreenText: onScreenText)
 
-            step(3, "Looking them up in Apple Music…")
+            let lookingUp = step("Looking them up in Apple Music…", from: 0.5, to: 0.85)
+            let screenPairs = AlbumExtractor.screenPairs(onScreenText, transcript: transcript)
+            let lookups = Double(mentions.count + screenPairs.count)
             // A lookup that still fails after retrying leaves that album unmatched rather than failing the run.
             var matches: [AlbumMatch] = []
-            for mention in mentions {
+            for (index, mention) in mentions.enumerated() {
                 matches.append((try? await AppleMusicSearch.match(mention)) ?? AlbumMatch(mention: mention, album: nil))
+                lookingUp(Double(index + 1) / lookups)
             }
             // The model sometimes skips an album in a long list, so also look up any "Title - Artist"
             // overlay it didn't list, keeping it only if Apple Music has it. Overlay names are clean, so
             // a quick lookup each way round is enough and saves searches.
-            let screenPairs = AlbumExtractor.screenPairs(onScreenText, transcript: transcript)
             var listed = mentions
-            for pair in screenPairs where !listed.contains(where: { $0.overlaps(pair) }) {
+            for (index, pair) in screenPairs.enumerated() {
+                lookingUp(Double(mentions.count + index + 1) / lookups)
+                guard !listed.contains(where: { $0.overlaps(pair) }) else { continue }
                 var match = (try? await AppleMusicSearch.match(pair, quick: true)) ?? AlbumMatch(mention: pair, album: nil)
                 if match.album == nil,
                    let swapped = try? await AppleMusicSearch.match(AlbumMention(artist: pair.album, album: pair.artist), quick: true) {
@@ -70,9 +77,10 @@ final class Finder {
             }
 
             // Covers are extra evidence, so a failed download or comparison never fails the run.
-            step(4, "Checking album covers…")
+            let checkingCovers = step("Checking album covers…", from: 0.85, to: 1)
             var albums: [SavedAlbum] = []
-            for var match in matches {
+            for (index, var match) in matches.enumerated() {
+                checkingCovers(Double(index) / Double(matches.count))
                 var coverSeen = false
                 if let album = match.album {
                     coverSeen = (try? await CoverMatcher.wasShown(album, in: covers)) ?? false
@@ -98,7 +106,8 @@ final class Finder {
             background.finish(title: "Albums found", message: "\(albums.count) album\(albums.count == 1 ? "" : "s") from “\(title)”", success: true)
             return folder
         } catch {
-            let message = error is CancellationError
+            let stopped = error is CancellationError || (error as? URLError)?.code == .cancelled
+            let message = stopped
                 ? "iOS stopped the run before it finished. Open Album Finder and try again."
                 : error.localizedDescription
             state = .failed(message)

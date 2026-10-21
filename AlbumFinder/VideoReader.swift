@@ -107,7 +107,9 @@ nonisolated enum VideoReader {
 
     /// Reads text off frames sampled every 1.5 seconds (album titles in overlays, covers, captions),
     /// and fingerprints whatever might be an album cover in them.
-    @concurrent static func screen(of videoURL: URL) async throws -> (lines: [String], covers: [FeaturePrintObservation]) {
+    @concurrent static func screen(
+        of videoURL: URL, onProgress: @escaping @MainActor (Double) -> Void
+    ) async throws -> (lines: [String], covers: [FeaturePrintObservation]) {
         let asset = AVURLAsset(url: videoURL)
         let duration = try await asset.load(.duration).seconds
 
@@ -126,7 +128,10 @@ nonisolated enum VideoReader {
         var lines: [String] = []
         var covers: [FeaturePrintObservation] = []
         var lastFramePrint: FeaturePrintObservation?
+        var framesRead = 0
         for await frame in generator.images(for: times) {
+            framesRead += 1
+            await onProgress(Double(framesRead) / Double(times.count))
             guard let image = try? frame.image else { continue }
             // Looking for covers is the slow part, so skip frames that look like the previous one.
             let framePrint = try await GenerateImageFeaturePrintRequest().perform(on: image)

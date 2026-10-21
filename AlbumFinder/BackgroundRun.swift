@@ -5,7 +5,7 @@ import UserNotifications
 /// Keeps a run going when the user leaves the app (iOS shows its progress meanwhile), and posts a
 /// notification when it ends. If iOS declines, the run simply continues in the foreground.
 final class BackgroundRun {
-    static let steps: Int64 = 5
+    static let units: Int64 = 1000
 
     private var task: BGContinuedProcessingTask?
 
@@ -15,7 +15,7 @@ final class BackgroundRun {
         BGTaskScheduler.shared.register(forTaskWithIdentifier: identifier, using: .main) { [weak self] task in
             MainActor.assumeIsolated {
                 guard let task = task as? BGContinuedProcessingTask else { return }
-                task.progress.totalUnitCount = Self.steps
+                task.progress.totalUnitCount = Self.units
                 task.expirationHandler = { Task { @MainActor in onExpire() } }
                 self?.task = task
             }
@@ -25,13 +25,15 @@ final class BackgroundRun {
         try? BGTaskScheduler.shared.submit(request)
     }
 
-    func step(_ number: Int64, _ description: String) {
-        task?.progress.completedUnitCount = number
+    /// `done` is how much of the whole run is finished, from 0 to 1. iOS stops runs whose progress
+    /// stops moving, so this should be called often.
+    func update(_ description: String, done: Double) {
+        task?.progress.completedUnitCount = Int64(done * Double(Self.units))
         task?.updateTitle("Finding albums", subtitle: description)
     }
 
     func finish(title: String, message: String, success: Bool) {
-        task?.progress.completedUnitCount = Self.steps
+        task?.progress.completedUnitCount = Self.units
         task?.setTaskCompleted(success: success)
         // Shown only while the app is in the background: in the foreground the result is already on screen.
         let content = UNMutableNotificationContent()
