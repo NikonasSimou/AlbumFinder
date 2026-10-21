@@ -65,11 +65,22 @@ nonisolated enum AlbumExtractor {
         let session = LanguageModelSession(instructions: instructions)
         let response = try await session.respond(to: prompt, generating: AlbumList.self)
         var unique: [AlbumMention] = []
-        for mention in response.content.albums where !unique.contains(mention) {
+        for mention in response.content.albums.map(withoutCredit) where !unique.contains(mention) {
             unique.append(mention)
         }
         let title = response.content.title.trimmingCharacters(in: .whitespacesAndNewlines)
         return (title.isEmpty ? "Untitled video" : title, unique)
+    }
+
+    /// The model sometimes copies a whole overlay as the title ("Magazine by YHWH Nailgun (2026)"),
+    /// so drop a trailing year and a trailing "by <the same artist>".
+    static func withoutCredit(_ mention: AlbumMention) -> AlbumMention {
+        var album = mention.album.replacing(#/\s*\((?:19|20)\d{2}\)\s*$/#, with: "")
+        if let by = album.ranges(of: #/\s+by\s+/#.ignoresCase()).last,
+           album[by.upperBound...].lowercased().trimmingCharacters(in: .whitespaces) == mention.artist.lowercased() {
+            album = String(album[..<by.lowerBound])
+        }
+        return AlbumMention(artist: mention.artist, album: album)
     }
 
     /// Whether the artist or album appears anywhere in the video's text, ignoring spaces and punctuation.
@@ -148,7 +159,8 @@ nonisolated enum AlbumExtractor {
         var joined: [String] = []
         for line in lines {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if let previous = joined.last, let dash = trimmed.first, "-–—".contains(dash) {
+            let isCredit = trimmed.first.map { "-–—".contains($0) } == true || trimmed.lowercased().hasPrefix("by ")
+            if let previous = joined.last, isCredit {
                 joined[joined.count - 1] = "\(previous) \(trimmed)"
             } else {
                 joined.append(line)
@@ -161,11 +173,20 @@ nonisolated enum AlbumExtractor {
     /// which side is the artist, so the lookup should try both.
     static func screenPairs(_ onScreenText: [String], transcript: String) -> [AlbumMention] {
         joiningArtistLines(withoutSpokenCaptions(onScreenText, transcript: transcript)).compactMap { line in
-            guard let dash = line.ranges(of: #/\s[-\u{2013}\u{2014}]\s/#).last else { return nil }
-            let album = line[..<dash.lowerBound].replacing(#/^\s*\d+\.\s*/#, with: "").trimmingCharacters(in: .whitespaces)
-            let artist = line[dash.upperBound...].trimmingCharacters(in: .whitespaces)
-            guard !album.isEmpty, !artist.isEmpty else { return nil }
-            return AlbumMention(artist: artist, album: album)
+            let line = line.replacing(#/^\s*\d+\.\s*/#, with: "").replacing(#/\s*\((?:19|20)\d{2}\)\s*$/#, with: "")
+            func pair(_ album: Substring, _ artist: Substring) -> AlbumMention? {
+                let album = album.trimmingCharacters(in: .whitespaces), artist = artist.trimmingCharacters(in: .whitespaces)
+                return album.isEmpty || artist.isEmpty ? nil : AlbumMention(artist: artist, album: album)
+            }
+            if let dash = line.ranges(of: #/\s[-\u{2013}\u{2014}]\s/#).last {
+                return pair(line[..<dash.lowerBound], line[dash.upperBound...])
+            }
+            // "Title by Artist", kept short so prose ("released by her own label") isn't taken for one.
+            guard let by = line.ranges(of: #/\s+by\s+/#.ignoresCase()).last,
+                  line[..<by.lowerBound].split(separator: " ").count <= 6,
+                  line[by.upperBound...].split(separator: " ").count <= 4
+            else { return nil }
+            return pair(line[..<by.lowerBound], line[by.upperBound...])
         }
     }
 }
