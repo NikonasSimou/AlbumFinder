@@ -44,27 +44,36 @@ nonisolated enum AppleMusicSearch {
         let artistName: String
     }
 
-    /// With `quick`, only the artist's catalog is checked.
+    /// With `quick`, the last-resort search by title alone is skipped.
     static func match(_ mention: AlbumMention, quick: Bool = false) async throws -> AlbumMatch {
         // The artist's full catalog has albums the search index misses (e.g. Death Grips' "The Money
         // Store"), and every album of theirs in the video reuses it.
         // Several artists can share a name (Noname and four "No Name"s), so try each match in turn.
+        var catalogs: [[CatalogAlbum]] = []
         for artist in try await artists(named: mention.artist) {
             let catalog = try await releases(of: artist)
-            // Within one artist's releases a loosely similar title is safe to accept, which catches
-            // foreign titles heard as English words ("Desire Disaster" for "Désir des astres").
-            if let best = best(in: catalog, for: mention) ?? best(in: catalog, for: mention, looseTitles: true) {
+            if let best = best(in: catalog, for: mention) {
+                return AlbumMatch(mention: mention, album: best)
+            }
+            catalogs.append(catalog)
+        }
+        // Recommendations are often songs shown with their album's cover ("Cicada Season" is on
+        // Fuubutsushi's "Fuubutsushi"), so a song by the artist links to its album. Song results also
+        // find releases whose artist is unknown or named differently.
+        let term = "\(mention.artist) \(mention.album)".trimmingCharacters(in: .whitespaces)
+        if let best = best(in: try await search(term, entity: "song", limit: 25), for: mention, matchingTracks: true) {
+            return AlbumMatch(mention: mention, album: best)
+        }
+        // Only now accept a loosely similar title within the artist's releases, which catches foreign
+        // titles heard as English words ("Desire Disaster" for "Désir des astres"). Before checking
+        // songs, the song "Marginalia #60" would have matched the single "Marginalia #204".
+        for catalog in catalogs {
+            if let best = best(in: catalog, for: mention, looseTitles: true) {
                 return AlbumMatch(mention: mention, album: best)
             }
         }
         if quick {
             return AlbumMatch(mention: mention, album: nil)
-        }
-        // Search finds what the catalog can't: releases whose artist is unknown or named differently,
-        // and recommended tracks. Song results carry their album's name, so they cover albums too.
-        let term = "\(mention.artist) \(mention.album)".trimmingCharacters(in: .whitespaces)
-        if let best = best(in: try await search(term, entity: "song", limit: 25), for: mention) {
-            return AlbumMatch(mention: mention, album: best)
         }
         // Search isn't forgiving about spelling, so a misheard artist ("Poppy Akroyd" for Ackroyd)
         // finds nothing. Searching the title alone still turns it up, and scoring tolerates the artist.
@@ -93,11 +102,13 @@ nonisolated enum AppleMusicSearch {
     /// so only accept a result whose artist and title both resemble what was mentioned.
     /// On a tie, the earlier result wins: it's ranked higher by Apple.
     private static func best(
-        in results: [CatalogAlbum], for mention: AlbumMention, lastResort: Bool = false, looseTitles: Bool = false
+        in results: [CatalogAlbum], for mention: AlbumMention,
+        matchingTracks: Bool = false, lastResort: Bool = false, looseTitles: Bool = false
     ) -> CatalogAlbum? {
         var best: (album: CatalogAlbum, score: Int)?
         for album in results {
-            let score = score(album, against: mention, lastResort: lastResort, looseTitles: looseTitles)
+            let score = score(
+                album, against: mention, matchingTracks: matchingTracks || lastResort, lastResort: lastResort, looseTitles: looseTitles)
             if score >= 2, score > (best?.score ?? 0) {
                 best = (album, score)
             }
@@ -170,15 +181,17 @@ nonisolated enum AppleMusicSearch {
     /// 2 points per field for an exact match, 1 when they're close, and a bonus point when the
     /// title matches word for word, so "Rumours" beats "Rumours (Live)". With no artist, the title
     /// alone decides and Apple's ranking breaks ties.
-    /// As a `lastResort`:
-    /// - a recommended track (e.g. Poppy Ackroyd's "Continuum") matches the album it's on. Any earlier
-    ///   and "Pink Moon" would match a compilation with that song.
-    /// - an exact title of five or more words matches whoever the artist is, since the person may be
-    ///   named instead of their project (Mark Nelson for Pan•American). Shorter titles aren't
-    ///   distinctive enough ("Good Kid, Mad City" is also someone else's single).
+    /// With `matchingTracks`, a recommended song (e.g. Poppy Ackroyd's "Continuum") matches the album it's
+    /// on, scoring below an album of that name. Only after the artist's albums were checked, or "Pink
+    /// Moon" would match a compilation with that song.
+    /// As a `lastResort`, an exact title of five or more words matches whoever the artist is, since the
+    /// person may be named instead of their project (Mark Nelson for Pan•American). Shorter titles aren't
+    /// distinctive enough ("Good Kid, Mad City" is also someone else's single).
     /// `looseTitles` accepts titles up to about a third different.
-    private static func score(_ album: CatalogAlbum, against mention: AlbumMention, lastResort: Bool, looseTitles: Bool) -> Int {
-        let trackTitle = lastResort ? album.trackName.map { min(1, similarity($0, mention.album)) } ?? 0 : 0
+    private static func score(
+        _ album: CatalogAlbum, against mention: AlbumMention, matchingTracks: Bool, lastResort: Bool, looseTitles: Bool
+    ) -> Int {
+        let trackTitle = matchingTracks ? album.trackName.map { min(1, similarity($0, mention.album)) } ?? 0 : 0
         var title = max(similarity(album.collectionName, mention.album), trackTitle)
         if title == 0, looseTitles, isClose(album.collectionName, mention.album, tolerance: 3) {
             title = 1
@@ -206,16 +219,18 @@ nonisolated enum AppleMusicSearch {
         let a = normalized(a), b = normalized(b)
         if a.isEmpty || b.isEmpty { return 0 }
         if a == b { return 2 }
+        // Numbers are distinctive: "Marginalia #60" is neither "Marginalia" nor "Marginalia #204".
+        guard a.filter(\.isNumber) == b.filter(\.isNumber) else { return 0 }
         // One name inside the other only counts if it's most of it: "clipping" isn't "Grass clippings".
         if (a.contains(b) || b.contains(a)), min(a.count, b.count) * 10 >= max(a.count, b.count) * 6 { return 1 }
         // Tolerate a misheard letter or two, e.g. "Fortet" for "Four Tet".
         return isClose(a, b, tolerance: 5) ? 1 : 0
     }
 
-    /// At most one edit per `tolerance` characters (and at least one) apart.
+    /// At most one edit per `tolerance` characters (and at least one) apart, with the same numbers.
     private static func isClose(_ a: String, _ b: String, tolerance: Int) -> Bool {
         let a = normalized(a), b = normalized(b)
-        guard !a.isEmpty, !b.isEmpty else { return false }
+        guard !a.isEmpty, !b.isEmpty, a.filter(\.isNumber) == b.filter(\.isNumber) else { return false }
         return editDistance(a, b) <= max(1, min(a.count, b.count) / tolerance)
     }
 

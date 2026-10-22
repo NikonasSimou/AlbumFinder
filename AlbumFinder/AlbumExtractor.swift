@@ -161,7 +161,10 @@ nonisolated enum AlbumExtractor {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             let isCredit = trimmed.first.map { "-–—".contains($0) } == true || trimmed.lowercased().hasPrefix("by ")
             if let previous = joined.last, isCredit {
-                joined[joined.count - 1] = "\(previous) \(trimmed)"
+                // A credit read twice ("by Emily A. Sprague", "by Enily A. Sprague") only joins once.
+                if !previous.contains(#/\s[-\u{2013}\u{2014}]\s|\sby\s/#.ignoresCase()) {
+                    joined[joined.count - 1] = "\(previous) \(trimmed)"
+                }
             } else {
                 joined.append(line)
             }
