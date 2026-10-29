@@ -2,6 +2,12 @@ import AVFoundation
 import Speech
 import Vision
 
+/// The text on screen at one sampled moment of the video.
+nonisolated struct ScreenMoment: Sendable {
+    let seconds: Double
+    let lines: [String]
+}
+
 /// Turns a video into text: what is said (speech) and what is shown (on-screen text).
 nonisolated enum VideoReader {
     enum ReadError: LocalizedError {
@@ -106,10 +112,11 @@ nonisolated enum VideoReader {
     }
 
     /// Reads text off frames sampled every 1.5 seconds (album titles in overlays, covers, captions),
-    /// and fingerprints whatever might be an album cover in them.
+    /// both as each line once and as what was on screen together, and fingerprints whatever might be
+    /// an album cover in them.
     @concurrent static func screen(
         of videoURL: URL, onProgress: @escaping @MainActor (Double) -> Void
-    ) async throws -> (lines: [String], covers: [FeaturePrintObservation]) {
+    ) async throws -> (lines: [String], moments: [ScreenMoment], covers: [FeaturePrintObservation]) {
         let asset = AVURLAsset(url: videoURL)
         let duration = try await asset.load(.duration).seconds
 
@@ -126,6 +133,7 @@ nonisolated enum VideoReader {
         // The same overlay stays on screen across many frames, so keep each line once.
         var seen = Set<String>()
         var lines: [String] = []
+        var moments: [ScreenMoment] = []
         var covers: [FeaturePrintObservation] = []
         var lastFramePrint: FeaturePrintObservation?
         var framesRead = 0
@@ -140,13 +148,18 @@ nonisolated enum VideoReader {
                 covers += try await CoverMatcher.coverPrints(in: image)
                 lastFramePrint = framePrint
             }
+            var frameLines: [String] = []
             for observation in try await request.perform(on: image) {
                 guard let line = observation.topCandidates(1).first?.string, line.count > 1 else { continue }
+                frameLines.append(line)
                 if seen.insert(line.lowercased()).inserted {
                     lines.append(line)
                 }
             }
+            if !frameLines.isEmpty {
+                moments.append(ScreenMoment(seconds: frame.requestedTime.seconds, lines: frameLines))
+            }
         }
-        return (lines, covers)
+        return (lines, moments, covers)
     }
 }

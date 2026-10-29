@@ -26,7 +26,15 @@ struct FolderDetailView: View {
                     Text("No albums found in this video.")
                         .foregroundStyle(.secondary)
                 }
-                ForEach(folder.sortedAlbums) { AlbumRow(album: $0) }
+                ForEach(folder.sortedAlbums.filter { !$0.isMention }) { AlbumRow(album: $0) }
+            }
+
+            // Albums named only to describe a recommendation ("for fans of …") or in passing.
+            let mentions = folder.sortedAlbums.filter(\.isMention)
+            if !mentions.isEmpty {
+                Section("Also mentioned") {
+                    ForEach(mentions) { AlbumRow(album: $0) }
+                }
             }
 
             if let note = folder.speechNote {
@@ -44,6 +52,11 @@ struct FolderDetailView: View {
                     Text(folder.onScreenText.joined(separator: "\n"))
                         .font(.footnote)
                         .foregroundStyle(.secondary)
+                    if !folder.timings.isEmpty {
+                        Text((folder.foundBy.isEmpty ? "" : "Found by \(folder.foundBy)\n") + folder.timings)
+                            .font(.footnote.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
         }
@@ -90,8 +103,21 @@ struct AlbumRow: View {
                     Text(album.title)
                         .font(.headline)
                         .lineLimit(2)
-                    Text(album.artist)
-                        .foregroundStyle(.secondary)
+                    if !album.artist.isEmpty {
+                        Text(album.artist)
+                            .foregroundStyle(.secondary)
+                    }
+                    // Mentions have their own section, so they need no label.
+                    if let kind = RecommendationKind(rawValue: album.kind), kind != .mention {
+                        Text(kind == .song && !album.song.isEmpty ? "Song recommendation: “\(album.song)”" : kind.label)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.pink)
+                    }
+                    if !album.summary.isEmpty {
+                        Text(album.summary)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
                     if !album.matched {
                         Text("No exact match. Tap to search Apple Music")
                             .font(.caption)
