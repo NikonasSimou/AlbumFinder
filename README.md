@@ -50,7 +50,7 @@ flowchart TD
     V4 -.-> C1
 
     subgraph Covers["5 · Check covers"]
-        C1["Compare Apple Music artwork<br/>with the video's fingerprints"] --> C2["Mark 'Cover seen in video', or pick<br/>the artist's album whose cover was shown"]
+        C1["Compare Apple Music artwork<br/>with the video's fingerprints"] --> C2["Mark 'Cover seen in video', or pick<br/>the artist's album whose cover was shown<br/>(or their only album, for a record not named)"]
     end
 
     C2 --> F1

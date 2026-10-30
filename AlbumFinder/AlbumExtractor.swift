@@ -80,6 +80,7 @@ nonisolated enum AlbumExtractor {
         Albums after "for fans of", "if you like" or "sounds like" are mentions: they describe the \
         recommendation and aren't recommended themselves.
         Leave out playlists, and songs mentioned only as highlights of an album already listed.
+        In a numbered or ranked list, every number is its own entry.
         A line like "Artist • Song" is the app's label for the sound playing in the video, not something \
         the person names: don't list it, and don't take the video's title from it.
         Also give the video a short title, using its headline text if it has one.
@@ -183,7 +184,12 @@ nonisolated enum AlbumExtractor {
             s.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil).filter { $0.isLetter || $0.isNumber }
         }
         let videoText = letters(text)
-        return [mention.artist, mention.album].map(letters).contains { $0.count >= 4 && videoText.contains($0) }
+        let names = [mention.artist, mention.album]
+        // An artist Claude spelled correctly ("Marinho Castellar", heard as "Marino Castello") still shares
+        // a long word with the video. Titles are left out: their words are often everyday ones ("there").
+        let words = mention.artist.split { !$0.isLetter && !$0.isNumber }.map { letters(String($0)) }
+        return names.map(letters).contains { $0.count >= 4 && videoText.contains($0) }
+            || words.contains { $0.count >= 5 && videoText.contains($0) }
     }
 
     /// The video's text as the model reads it.

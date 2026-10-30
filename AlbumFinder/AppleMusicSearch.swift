@@ -113,6 +113,12 @@ nonisolated enum AppleMusicSearch {
         } ?? found
     }
 
+    /// The artist's one album, if they have only one besides singles and EPs.
+    static func onlyAlbum(in releases: [CatalogAlbum]) -> CatalogAlbum? {
+        let albums = releases.filter { !$0.collectionName.hasSuffix(" - Single") && !$0.collectionName.hasSuffix(" - EP") }
+        return albums.count == 1 ? albums[0] : nil
+    }
+
     /// The releases of the artist closest to that name, or none if Apple Music has no such artist.
     static func releases(by artist: String) async throws -> [CatalogAlbum] {
         guard let closest = try await artists(named: artist).first else { return [] }

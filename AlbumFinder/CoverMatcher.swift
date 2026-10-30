@@ -66,14 +66,21 @@ nonisolated enum CoverMatcher {
 
     /// The candidate whose cover came closest to something shown, if under the threshold.
     static func pick(from candidates: [CatalogAlbum], shown: [FeaturePrintObservation]) async throws -> CatalogAlbum? {
-        var best: (album: CatalogAlbum, distance: Double)?
-        for album in candidates.prefix(30) {
-            guard let url = album.largeArtworkURL, let artwork = try await artworkPrint(url) else { continue }
-            let distance = distance(artwork, to: shown)
-            if distance < threshold, distance < (best?.distance ?? .infinity) {
-                best = (album, distance)
+        // One cover after another took 17 s for an artist with many releases, so fetch them all at once.
+        let distances = await withTaskGroup(of: (index: Int, distance: Double)?.self) { group in
+            for (index, album) in candidates.prefix(30).enumerated() {
+                group.addTask {
+                    guard let url = album.largeArtworkURL, let artwork = try? await artworkPrint(url) else { return nil }
+                    return (index, distance(artwork, to: shown))
+                }
             }
+            var distances: [(index: Int, distance: Double)] = []
+            for await result in group {
+                if let result { distances.append(result) }
+            }
+            return distances
         }
-        return best?.album
+        guard let best = distances.filter({ $0.distance < threshold }).min(by: { $0.distance < $1.distance }) else { return nil }
+        return candidates[best.index]
     }
 }

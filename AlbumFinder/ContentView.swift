@@ -166,7 +166,9 @@ final class Finder {
         // A lookup that still fails after retrying leaves that album unmatched rather than failing the run.
         var matches: [AlbumMatch] = []
         for (index, mention) in mentions.enumerated() {
-            if mention.kind == .artist, mention.album.isEmpty {
+            // With no album named (a band, or an artist mentioned in passing) there's nothing to search for
+            // but the artist, which takes one request rather than up to five.
+            if mention.album.isEmpty {
                 let page = try? await AppleMusicSearch.artistPage(named: mention.artist)
                 matches.append(AlbumMatch(mention: mention, album: nil, artistPage: page ?? nil))
             } else {
@@ -210,14 +212,24 @@ final class Finder {
         for (index, var match) in matches.enumerated() {
             checkingCovers(Double(index) / Double(matches.count))
             var coverSeen = false
+            var pickedFromCatalog = false
             if let album = match.album {
                 coverSeen = (try? await CoverMatcher.wasShown(album, in: covers)) ?? false
-            } else if match.artistPage == nil, !match.mention.artist.isEmpty,
-                      let releases = try? await AppleMusicSearch.releases(by: match.mention.artist),
-                      let shown = try? await CoverMatcher.pick(from: releases, shown: covers) {
-                // The title didn't match anything, but one of the artist's covers was on screen.
-                match = AlbumMatch(mention: match.mention, album: shown)
-                coverSeen = true
+            } else if match.artistPage == nil || match.mention.kind != .mention, !match.mention.artist.isEmpty,
+                      let releases = try? await AppleMusicSearch.releases(by: match.mention.artist) {
+                if let shown = try? await CoverMatcher.pick(from: releases, shown: covers) {
+                    // The title didn't match anything, or wasn't said at all ("number two, we have Chico
+                    // Maranhão" while holding up the record), but one of the artist's covers was on screen.
+                    match = AlbumMatch(mention: match.mention, album: shown)
+                    coverSeen = true
+                    pickedFromCatalog = true
+                } else if match.mention.kind != .mention, match.mention.album.isEmpty,
+                          let only = AppleMusicSearch.onlyAlbum(in: releases) {
+                    // "At number three, we have Flaviola e o Bando do Sol": a record by a band with just
+                    // one album can only be that album.
+                    match = AlbumMatch(mention: match.mention, album: only)
+                    pickedFromCatalog = true
+                }
             }
             // An unmatched entry whose names appear nowhere in the video was made up by the model.
             if match.album == nil, match.artistPage == nil,
@@ -225,7 +237,12 @@ final class Finder {
                 continue
             }
             // Overlays the safety net adds don't say whether they're a song; a match through one does.
-            let kind: RecommendationKind = match.viaSong && match.mention.kind == .album ? .song : match.mention.kind
+            // A band recommendation whose record was found recommends that record.
+            let kind: RecommendationKind = switch match.mention.kind {
+            case .album where match.viaSong: .song
+            case .artist where pickedFromCatalog: .album
+            default: match.mention.kind
+            }
             // The same album can come up twice under different names: keep it once, as the stronger kind.
             let summary = descriptions[match.mention] ?? ""
             if let earlier = results.firstIndex(where: { AppleMusicSearch.sameRelease($0.match, match) }) {
